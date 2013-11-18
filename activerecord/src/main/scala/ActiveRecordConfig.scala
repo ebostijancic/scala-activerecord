@@ -24,6 +24,10 @@ object Config {
     val clazz = companion.classInfo.clazz
     tables.getOrElse(clazz, throw ActiveRecordException.tableNotFound(clazz.toString))
   }
+  def autoCreate: Boolean = conf.autoCreate
+  def autoDrop: Boolean = conf.autoDrop
+  def connection: java.sql.Connection = conf.connection
+  def adapter: DatabaseAdapter = conf.adapter
 
   def cleanup: Unit = conf.cleanup
 
@@ -46,6 +50,8 @@ object Config {
 }
 
 trait ActiveRecordConfig {
+  def autoCreate: Boolean
+  def autoDrop: Boolean
   def connection: Connection
   def adapter: DatabaseAdapter
 
@@ -116,7 +122,10 @@ class DefaultConfig(
   }
   def getString(key: String): Option[String] = get[String](key).orElse(get(key, config.getString))
   def getInt(key: String): Option[Int] = get[Int](key).orElse(get(key, config.getInt))
+  def getBoolean(key: String): Option[Boolean] = get[Boolean](key).orElse(get(key, config.getBoolean))
 
+  lazy val autoCreate = getBoolean("autoCreate").getOrElse(true)
+  lazy val autoDrop = getBoolean("autoDrop").getOrElse(false)
   lazy val driverClass = getString("driver").getOrElse("org.h2.Driver")
   lazy val jdbcurl = getString("jdbcurl").getOrElse("jdbc:h2:mem:activerecord")
   lazy val username = getString("username")

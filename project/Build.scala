@@ -2,16 +2,28 @@ import sbt._
 import Keys._
 
 object ActiveRecordBuild extends Build {
-  val _version = "0.2.2"
+  val _version = "0.2.4"
   val isRelease = System.getProperty("release") == "true"
 
-  def specs2(key: String, version: String) =
-    "org.specs2" %% "specs2" % (
-       if (version.startsWith("2.10")) "2.0" else "1.12.3"
-     ) % key
+  def specs2(scope: String) = Def.setting {
+    val v = if (scalaBinaryVersion.value == "2.10") "2.2.2" else "1.12.4.1"
+    "org.specs2" %% "specs2" % v % scope
+  }
+
+  val compilerSettings = Seq(
+    javacOptions ++= Seq("-source", "1.6", "-target", "1.6"),
+    scalacOptions ++= Seq("-deprecation", "-unchecked") ++
+      Some("-feature").filter(_ => scalaBinaryVersion.value == "2.10"),
+    scalacOptions in Compile in doc ++= {
+      val base = baseDirectory.value
+      Seq("-sourcepath", base.getAbsolutePath, "-doc-source-url",
+        "https://github.com/aselab/scala-activerecord/tree/master/%s€{FILE_PATH}.scala".format(base.getName)
+      ) ++ Some("-diagrams").filter(_ => scalaBinaryVersion.value == "2.10")
+    },
+    compileOrder in Compile := CompileOrder.JavaThenScala
+  )
 
   val defaultResolvers = Seq(
-    Resolver.sonatypeRepo("releases"),
     Resolver.sonatypeRepo("snapshots"),
     Classpaths.typesafeReleases
   )
@@ -23,24 +35,17 @@ object ActiveRecordBuild extends Build {
     crossScalaVersions := Seq("2.10.2", "2.9.2"),
     resolvers ++= defaultResolvers,
     libraryDependencies ++= Seq(
-      "junit" % "junit" % "4.11" % "test",
+      specs2("test").value,
       "org.mockito" % "mockito-all" % "1.9.5" % "test",
       "com.h2database" % "h2" % "1.3.170" % "test",
-      "ch.qos.logback" % "logback-classic" % "1.0.9" % "test"
+      "ch.qos.logback" % "logback-classic" % "1.0.9" % "test",
+      "junit" % "junit" % "4.11" % "test"
     ),
-    libraryDependencies <+= scalaVersion(v => specs2("test", v)),
-    javacOptions ++= Seq("-source", "1.6", "-target", "1.6"),
-    scalacOptions ++= Seq("-deprecation", "-unchecked"),
-    scalacOptions in Compile in doc <++= (baseDirectory, scalaVersion).map { (base, version) => Seq(
-      "-sourcepath", base.getAbsolutePath, "-doc-source-url",
-      "https://github.com/aselab/scala-activerecord/tree/master/%s€{FILE_PATH}.scala".format(base.getName)
-    ) ++ (if (version.startsWith("2.10")) Seq("-diagrams") else Nil) },
-    testOptions in Test ++= (if (Option(System.getProperty("ci")).isDefined) Seq(Tests.Argument("junitxml", "console")) else Nil),
+    testOptions in Test ++= Option(System.getProperty("ci")).map(_ => Tests.Argument("junitxml", "console")).toSeq,
     parallelExecution in Test := false,
-    compileOrder in Compile := CompileOrder.JavaThenScala,
-    publishTo <<= version { (v: String) =>
+    publishTo := {
       val nexus = "https://oss.sonatype.org/"
-      if (v.trim.endsWith("SNAPSHOT"))
+      if (version.value.trim.endsWith("SNAPSHOT"))
         Some("snapshots" at nexus + "content/repositories/snapshots")
       else
         Some("releases"  at nexus + "service/local/staging/deploy/maven2")
@@ -52,12 +57,21 @@ object ActiveRecordBuild extends Build {
     shellPrompt := {
       (state: State) => Project.extract(state).currentProject.id + "> "
     }
-  ) ++ org.scalastyle.sbt.ScalastylePlugin.Settings
+  ) ++ compilerSettings ++ org.scalastyle.sbt.ScalastylePlugin.Settings
 
-  lazy val root: Project = Project("root", file("."))
+  val pluginSettings = defaultSettings ++ ScriptedPlugin.scriptedSettings ++
+    Seq(
+      sbtPlugin := true,
+      crossScalaVersions := Seq("2.10.2"),
+      ScriptedPlugin.scriptedBufferLog := false,
+      ScriptedPlugin.scriptedLaunchOpts += "-Dversion=" + version.value,
+      watchSources ++= ScriptedPlugin.sbtTestDirectory.value.***.get
+    )
+
+  lazy val root = project.in(file("."))
     .settings(defaultSettings: _*)
     .settings(publish := {}, publishLocal := {})
-    .aggregate(core, specs, play2, scalatra)
+    .aggregate(core, specs, play2, scalatra, generator, play2Sbt, scalatraSbt)
 
   lazy val core: Project = Project("core", file("activerecord"),
     settings = defaultSettings ++ Seq(
@@ -71,7 +85,7 @@ object ActiveRecordBuild extends Build {
         "commons-validator" % "commons-validator" % "1.4.0",
         "org.slf4j" % "slf4j-api" % "1.7.2"
       ),
-      unmanagedSourceDirectories in Test <++= Seq(scalaSource in Compile in specs).join,
+      unmanagedSourceDirectories in Test += (scalaSource in Compile in specs).value,
       initialCommands in console in Test := """
       import com.github.aselab.activerecord._
       import com.github.aselab.activerecord.dsl._
@@ -81,46 +95,49 @@ object ActiveRecordBuild extends Build {
     )
   )
 
-  lazy val specs: Project = Project("specs", file("activerecord-specs"),
-    settings = defaultSettings ++ Seq(
-      name := "scala-activerecord-specs",
-      libraryDependencies <+= scalaVersion(v => specs2("provided", v))
-    )
-  ) dependsOn(core)
+  lazy val specs = project.settings(defaultSettings:_*).settings(
+    name := "scala-activerecord-specs",
+    libraryDependencies += specs2("provided").value
+  ).dependsOn(core)
 
-  lazy val play2: Project = Project("play2", file("activerecord-play2"),
-    settings = defaultSettings ++ Seq(
-      name := "scala-activerecord-play2",
-      resolvers += "typesafe" at "http://repo.typesafe.com/typesafe/repo",
-      libraryDependencies <++= (scalaVersion) { scalaVersion =>
-        scalaVersion match {
-          case s if s.startsWith("2.10") => {
-            val playVersion = "2.1.0"
-            Seq(
-              "play" %% "play" % playVersion % "provided",
-              "play" %% "play-jdbc" % playVersion % "provided"
-            )
-          }
-          case _ => {
-            val playVersion = "2.0.4"
-            Seq(
-              "play" % "play_2.9.1" % playVersion % "provided"
-            )
-          }
-        }
+  lazy val play2 = project.settings(defaultSettings:_*).settings(
+    name := "scala-activerecord-play2",
+    resolvers += "typesafe" at "http://repo.typesafe.com/typesafe/repo",
+    libraryDependencies ++= {
+      scalaBinaryVersion.value match {
+        case "2.10" => Seq(
+          "play" %% "play" % "2.1.0" % "provided",
+          "play" %% "play-jdbc" % "2.1.0" % "provided"
+        )
+        case _ => Seq("play" % "play_2.9.1" % "2.0.4" % "provided")
       }
-    )
-  ) dependsOn(core)
+    }
+  ).dependsOn(core)
 
-  lazy val scalatra: Project = Project("scalatra", file("activerecord-scalatra"),
-    settings = defaultSettings ++ Seq(
-      name := "scala-activerecord-scalatra",
-      libraryDependencies ++= Seq(
-        "org.scalatra" %% "scalatra" % "2.2.0" % "provided",
-        "org.eclipse.jetty.orbit" % "javax.servlet" % "3.0.0.v201112011016" % "provided" artifacts (Artifact("javax.servlet", "jar", "jar"))
-      )
+  lazy val scalatra = project.settings(defaultSettings:_*).settings(
+    name := "scala-activerecord-scalatra",
+    resolvers += "Akka Repo" at "http://repo.akka.io/repository",
+    libraryDependencies ++= Seq(
+      "org.scalatra" %% "scalatra" % "2.2.0" % "provided",
+      "org.eclipse.jetty.orbit" % "javax.servlet" % "3.0.0.v201112011016" % "provided" artifacts (Artifact("javax.servlet", "jar", "jar"))
     )
-  ) dependsOn(core)
+  ).dependsOn(core)
+
+  lazy val generator = project.settings(pluginSettings:_*).settings(
+    name := "scala-activerecord-generator",
+    libraryDependencies ++= Seq(
+      "org.fusesource.scalate" %% "scalate-core" % "1.6.1",
+      "io.backchat.inflector" %% "scala-inflector" % "1.3.5"
+    )
+  )
+
+  lazy val play2Sbt = project.settings(pluginSettings:_*).settings(
+    name := "scala-activerecord-play2-sbt"
+  ).dependsOn(generator)
+
+  lazy val scalatraSbt = project.settings(pluginSettings:_*).settings(
+    name := "scala-activerecord-scalatra-sbt"
+  ).dependsOn(generator)
 
   val pomXml =
     <url>https://github.com/aselab/scala-activerecord</url>
